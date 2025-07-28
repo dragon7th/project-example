@@ -1,12 +1,13 @@
 //
 //  SantasToyManagerApp.swift
-//  Complete SwiftUI + JSON App
+//  Complete SwiftUI + JSON + CoreData App
 //
 
 import SwiftUI
 import Foundation
+import CoreData
 
-// MARK: - Toy Model
+// MARK: - Toy Model for JSON (Struct)
 struct Toy: Codable, Identifiable {
     var id = UUID()
     var name: String
@@ -14,54 +15,90 @@ struct Toy: Codable, Identifiable {
     var category: String?
 }
 
-// MARK: - Toy Manager with JSON Persistence
+// MARK: - Core Data Model Helper
+extension ToyEntity {
+    var wrappedName: String { name ?? "Unknown" }
+    var wrappedCategory: String { category ?? "Uncategorized" }
+}
+
+// MARK: - Toy Manager
 class ToyManager: ObservableObject {
-    @Published private(set) var toys: [Toy] = []
+    @Published var toys: [Toy] = []
+    private let container: NSPersistentContainer
+
+    init(container: NSPersistentContainer = PersistenceController.shared.container) {
+        self.container = container
+        loadFromCoreData()
+    }
 
     // Create
     func createToy(name: String, amount: Int) {
-        let toy = Toy(name: name, amount: amount)
-        toys.append(toy)
-        saveToJSON()
+        let toy = ToyEntity(context: container.viewContext)
+        toy.id = UUID()
+        toy.name = name
+        toy.amount = Int32(amount)
+        toy.category = nil
+        saveContext()
+        loadFromCoreData()
     }
 
-    // Update quantity
+    // Update Quantity
     func updateQuantity(for toyName: String, to amount: Int) {
-        guard let index = toys.firstIndex(where: { $0.name == toyName }) else { return }
-        toys[index].amount = amount
-        saveToJSON()
+        let request: NSFetchRequest<ToyEntity> = ToyEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "name == %@", toyName)
+        if let results = try? container.viewContext.fetch(request),
+           let toy = results.first {
+            toy.amount = Int32(amount)
+            saveContext()
+            loadFromCoreData()
+        }
     }
 
-    // Add category
+    // Add Category to All
     func addCategory(_ category: String) {
-        toys = toys.map { toy in
-            var modified = toy
-            modified.category = category
-            return modified
-        }
-        saveToJSON()
-    }
-
-    // MARK: JSON Persistence
-    private let fileName = "toys.json"
-
-    func saveToJSON() {
-        let encoder = JSONEncoder()
-        guard let data = try? encoder.encode(toys) else { return }
-        if let url = getDocumentsDirectory()?.appendingPathComponent(fileName) {
-            try? data.write(to: url)
+        let request: NSFetchRequest<ToyEntity> = ToyEntity.fetchRequest()
+        if let results = try? container.viewContext.fetch(request) {
+            for toy in results {
+                toy.category = category
+            }
+            saveContext()
+            loadFromCoreData()
         }
     }
 
-    func loadFromJSON() {
-        guard let url = getDocumentsDirectory()?.appendingPathComponent(fileName),
-              let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode([Toy].self, from: data) else { return }
-        self.toys = decoded
+    // Load from Core Data
+    func loadFromCoreData() {
+        let request: NSFetchRequest<ToyEntity> = ToyEntity.fetchRequest()
+        if let results = try? container.viewContext.fetch(request) {
+            toys = results.map {
+                Toy(id: $0.id ?? UUID(), name: $0.wrappedName, amount: Int($0.amount), category: $0.category)
+            }
+        }
     }
 
-    private func getDocumentsDirectory() -> URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+    private func saveContext() {
+        if container.viewContext.hasChanges {
+            try? container.viewContext.save()
+        }
+    }
+}
+
+// MARK: - Persistence Controller
+struct PersistenceController {
+    static let shared = PersistenceController()
+
+    let container: NSPersistentContainer
+
+    init(inMemory: Bool = false) {
+        container = NSPersistentContainer(name: "SantasToyModel")
+        if inMemory {
+            container.persistentStoreDescriptions.first?.url = URL(fileURLWithPath: "/dev/null")
+        }
+        container.loadPersistentStores { _, error in
+            if let error = error as NSError? {
+                fatalError("Unresolved error \(error), \(error.userInfo)")
+            }
+        }
     }
 }
 
@@ -109,9 +146,6 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Santa's Toy Manager")
-            .onAppear {
-                toyManager.loadFromJSON()
-            }
         }
     }
 }
@@ -119,9 +153,12 @@ struct ContentView: View {
 // MARK: - App Entry
 @main
 struct SantasToyManagerApp: App {
+    let persistenceController = PersistenceController.shared
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(\.managedObjectContext, persistenceController.container.viewContext)
         }
     }
 }
